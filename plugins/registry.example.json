@@ -1,0 +1,10 @@
+[
+  {
+    "name": "speedrun",
+    "title": "Speedrun forensics",
+    "version": "1.0.0",
+    "description": "Run verification: Verify run, speedrun QC profile, retimer, load remover / LRT, music continuity scan, luck calculator.",
+    "zip_url": "https://YOUR-HOST/plugins/speedrun-1.0.0.zip",
+    "sha256": "OPTIONAL-SHA256-OF-THE-ZIP"
+  }
+]

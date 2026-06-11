@@ -1,0 +1,8 @@
+{
+  "name": "ocr",
+  "title": "Timer / timecode OCR",
+  "version": "1.0.0",
+  "description": "Burned-in timer audit: calibrate the overlay font once (no OCR engine needed), then read it on every frame - backward jumps and skips (splice evidence), freezes, and clock-drift slope (slowed/sped-up footage). LiveSplit, in-game timers, SMPTE burn-ins, CCTV timestamps.",
+  "entry": "plugin.py",
+  "api": 2
+}

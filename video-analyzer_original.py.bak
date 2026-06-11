@@ -1,0 +1,774 @@
+#!/usr/bin/env python3
+"""
+Video Stream Analyzer with HDR Support & Live Hue/Saturation Chart
+===================================================================
+Opens a video file, extracts all stream metadata (including HDR10,
+HDR10+, HLG, Dolby Vision side data), and displays live hue-vs-saturation
+and luminance distribution charts alongside the video as it plays.
+
+Requirements:
+    pip install opencv-python numpy matplotlib
+
+Usage:
+    python video_analyzer.py
+    python video_analyzer.py path/to/video.mp4
+"""
+
+import sys
+import os
+import json
+import subprocess
+import threading
+import time
+import tkinter as tk
+from tkinter import filedialog, ttk, scrolledtext
+from collections import OrderedDict
+
+import cv2
+import numpy as np
+import matplotlib
+matplotlib.use("TkAgg")
+from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
+from matplotlib.figure import Figure
+from matplotlib.colors import LinearSegmentedColormap
+
+
+# ─── HDR Constants ───────────────────────────────────────────────────────────
+
+COLOR_PRIMARIES = {
+    "1":  "BT.709 (SDR)",
+    "4":  "BT.470M",
+    "5":  "BT.470BG (PAL/SECAM)",
+    "6":  "SMPTE 170M (NTSC)",
+    "7":  "SMPTE 240M",
+    "8":  "Film",
+    "9":  "BT.2020 (HDR / Wide Gamut)",
+    "10": "SMPTE ST 428-1 (CIE XYZ)",
+    "11": "SMPTE RP 431-2 (DCI-P3)",
+    "12": "SMPTE EG 432-1 (Display P3)",
+    "22": "EBU Tech. 3213-E",
+}
+
+TRANSFER_CHARACTERISTICS = {
+    "1":  "BT.709 (SDR Gamma ≈2.4)",
+    "4":  "BT.470M (Gamma 2.2)",
+    "5":  "BT.470BG (Gamma 2.8)",
+    "6":  "SMPTE 170M",
+    "7":  "SMPTE 240M",
+    "8":  "Linear",
+    "9":  "Logarithmic (100:1)",
+    "10": "Logarithmic (316:1)",
+    "11": "IEC 61966-2-4",
+    "12": "BT.1361",
+    "13": "sRGB / sYCC",
+    "14": "BT.2020 (10-bit SDR)",
+    "15": "BT.2020 (12-bit SDR)",
+    "16": "SMPTE ST 2084 (PQ / HDR10)",
+    "17": "SMPTE ST 428-1",
+    "18": "ARIB STD-B67 (HLG)",
+}
+
+MATRIX_COEFFICIENTS = {
+    "0":  "Identity / GBR",
+    "1":  "BT.709",
+    "5":  "BT.470BG",
+    "6":  "SMPTE 170M",
+    "7":  "SMPTE 240M",
+    "8":  "YCgCo",
+    "9":  "BT.2020 NCL (Non-Constant Luminance)",
+    "10": "BT.2020 CL (Constant Luminance)",
+    "11": "SMPTE ST 2085 (Y'D'zD'x)",
+    "12": "Chroma-derived NCL",
+    "13": "Chroma-derived CL",
+    "14": "ICtCp",
+}
+
+
+def classify_hdr(stream: dict, side_data: list | None = None) -> dict:
+    """Classify the HDR format from stream metadata and side data."""
+    info = OrderedDict()
+
+    transfer = str(stream.get("color_transfer", ""))
+    primaries = str(stream.get("color_primaries", ""))
+    matrix = str(stream.get("color_space", ""))
+    pix_fmt = stream.get("pix_fmt", "")
+    bits = stream.get("bits_per_raw_sample", "")
+
+    # Resolve friendly names
+    info["Color Primaries"] = COLOR_PRIMARIES.get(primaries, primaries)
+    info["Transfer Curve"] = TRANSFER_CHARACTERISTICS.get(transfer, transfer)
+    info["Matrix Coefficients"] = MATRIX_COEFFICIENTS.get(matrix, matrix)
+    info["Pixel Format"] = pix_fmt
+    if bits:
+        info["Bit Depth"] = f"{bits}-bit"
+
+    # Detect HDR type
+    hdr_type = "SDR"
+    is_wide_gamut = primaries in ("9", "bt2020nc", "bt2020c", "bt2020")
+    is_pq = transfer in ("16", "smpte2084")
+    is_hlg = transfer in ("18", "arib-std-b67")
+    is_high_bit = pix_fmt and ("10" in pix_fmt or "12" in pix_fmt or "16" in pix_fmt)
+
+    if is_pq:
+        hdr_type = "HDR10 (PQ)"
+    elif is_hlg:
+        hdr_type = "HLG"
+    elif is_wide_gamut and is_high_bit:
+        hdr_type = "Wide Color Gamut (possibly HDR)"
+
+    # Parse side_data for HDR10 / HDR10+ / Dolby Vision
+    has_mdcv = False
+    has_cll = False
+    has_dovi = False
+    has_hdr10plus = False
+
+    if side_data:
+        for sd in side_data:
+            sd_type = sd.get("side_data_type", "")
+
+            # Mastering Display Colour Volume (MDCV) — HDR10
+            if "Mastering display" in sd_type or "mastering_display" in sd_type:
+                has_mdcv = True
+                info["── Mastering Display ──"] = ""
+                # Parse display primaries
+                for key in ("red_x", "red_y", "green_x", "green_y",
+                            "blue_x", "blue_y", "white_point_x", "white_point_y"):
+                    if key in sd:
+                        raw = sd[key]
+                        # ffprobe gives these as "N/M" rationals
+                        if isinstance(raw, str) and "/" in raw:
+                            num, den = raw.split("/")
+                            val = int(num) / int(den) if int(den) != 0 else raw
+                            info[f"  {key}"] = f"{val:.5f}"
+                        else:
+                            info[f"  {key}"] = str(raw)
+                for key in ("min_luminance", "max_luminance"):
+                    if key in sd:
+                        raw = sd[key]
+                        if isinstance(raw, str) and "/" in raw:
+                            num, den = raw.split("/")
+                            val = int(num) / int(den) if int(den) != 0 else raw
+                            info[f"  {key}"] = f"{val:.4f} cd/m² (nits)"
+                        else:
+                            info[f"  {key}"] = f"{raw} cd/m² (nits)"
+
+            # Content Light Level (CLL) — HDR10
+            if "Content light level" in sd_type or "content_light_level" in sd_type:
+                has_cll = True
+                info["── Content Light Level ──"] = ""
+                if "max_content" in sd:
+                    info["  MaxCLL"] = f"{sd['max_content']} nits"
+                if "max_average" in sd:
+                    info["  MaxFALL"] = f"{sd['max_average']} nits"
+
+            # Dolby Vision
+            if "Dolby Vision" in sd_type or "dovi" in sd_type.lower():
+                has_dovi = True
+                info["── Dolby Vision ──"] = ""
+                for k, v in sd.items():
+                    if k != "side_data_type":
+                        info[f"  {k}"] = str(v)
+
+            # HDR10+
+            if "HDR10+" in sd_type or "hdr10plus" in sd_type.lower() or "dynamic" in sd_type.lower():
+                has_hdr10plus = True
+                info["── HDR10+ Dynamic Metadata ──"] = ""
+                for k, v in sd.items():
+                    if k != "side_data_type":
+                        info[f"  {k}"] = str(v)
+
+    # Refine HDR type label
+    if has_dovi and is_pq:
+        hdr_type = "Dolby Vision + HDR10"
+    elif has_dovi:
+        hdr_type = "Dolby Vision"
+    elif has_hdr10plus and is_pq:
+        hdr_type = "HDR10+"
+    elif is_pq and has_mdcv:
+        hdr_type = "HDR10"
+    elif is_pq:
+        hdr_type = "PQ (HDR10 — no static metadata)"
+
+    info["HDR Format"] = hdr_type
+
+    # Gamut flags
+    if is_wide_gamut:
+        info["Wide Gamut"] = "Yes (BT.2020)"
+    if has_mdcv:
+        info["Static Metadata"] = "SMPTE ST 2086 (MDCV) present"
+    if has_cll:
+        info["Light Level"] = "CTA-861.3 (CLL) present"
+
+    return info
+
+
+# ─── Stream Info Extraction ──────────────────────────────────────────────────
+
+def extract_with_ffprobe(path: str) -> dict | None:
+    """Try to get rich metadata via ffprobe (if available)."""
+    try:
+        cmd = [
+            "ffprobe", "-v", "quiet",
+            "-print_format", "json",
+            "-show_format", "-show_streams",
+            "-show_frames", "-read_intervals", "%+#1",   # first frame side_data
+            path
+        ]
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+        if result.returncode == 0:
+            return json.loads(result.stdout)
+    except (FileNotFoundError, subprocess.TimeoutExpired, json.JSONDecodeError):
+        pass
+    # Fallback without frame data
+    try:
+        cmd = [
+            "ffprobe", "-v", "quiet",
+            "-print_format", "json",
+            "-show_format", "-show_streams",
+            path
+        ]
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=15)
+        if result.returncode == 0:
+            return json.loads(result.stdout)
+    except (FileNotFoundError, subprocess.TimeoutExpired, json.JSONDecodeError):
+        pass
+    return None
+
+
+def extract_with_opencv(path: str) -> dict:
+    """Fallback: extract what OpenCV can tell us."""
+    cap = cv2.VideoCapture(path)
+    if not cap.isOpened():
+        return {"error": "Cannot open file with OpenCV"}
+
+    props = OrderedDict()
+    props["File"] = os.path.basename(path)
+    props["File Size"] = f"{os.path.getsize(path) / (1024*1024):.2f} MB"
+
+    w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+    h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    fps = cap.get(cv2.CAP_PROP_FPS)
+    total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+    fourcc_int = int(cap.get(cv2.CAP_PROP_FOURCC))
+    fourcc_str = "".join(chr((fourcc_int >> 8 * i) & 0xFF) for i in range(4))
+    duration = total / fps if fps > 0 else 0
+
+    props["Resolution"] = f"{w}x{h}"
+    props["Frame Rate"] = f"{fps:.3f} fps"
+    props["Total Frames"] = str(total)
+    props["Duration"] = f"{duration:.2f}s ({time.strftime('%H:%M:%S', time.gmtime(duration))})"
+    props["FourCC Codec"] = fourcc_str
+    props["Backend"] = cap.getBackendName()
+    props["HDR Note"] = "Install ffprobe (FFmpeg) for full HDR metadata extraction"
+    cap.release()
+    return {"opencv": props}
+
+
+def format_ffprobe(data: dict) -> str:
+    """Pretty-format ffprobe JSON into readable text."""
+    lines = []
+
+    # Gather frame side_data for HDR
+    frame_side_data = {}
+    for frame in data.get("frames", []):
+        sidx = frame.get("stream_index", 0)
+        sd = frame.get("side_data_list", [])
+        if sd:
+            frame_side_data.setdefault(sidx, []).extend(sd)
+
+    # Format
+    if "format" in data:
+        fmt = data["format"]
+        lines.append("═" * 62)
+        lines.append("  CONTAINER / FORMAT")
+        lines.append("═" * 62)
+        for key in ("filename", "format_name", "format_long_name",
+                     "duration", "size", "bit_rate", "nb_streams", "nb_programs"):
+            if key in fmt:
+                val = fmt[key]
+                if key == "size":
+                    val = f"{int(val)/(1024*1024):.2f} MB ({val} bytes)"
+                elif key == "bit_rate":
+                    val = f"{int(val)/1000:.1f} kbps"
+                elif key == "duration":
+                    sec = float(val)
+                    val = f"{sec:.3f}s ({time.strftime('%H:%M:%S', time.gmtime(sec))})"
+                lines.append(f"  {key:25s} : {val}")
+        if "tags" in fmt and fmt["tags"]:
+            lines.append("  ── tags ──")
+            for k, v in fmt["tags"].items():
+                lines.append(f"    {k:23s} : {v}")
+
+    # Streams
+    for i, s in enumerate(data.get("streams", [])):
+        codec_type = s.get("codec_type", "unknown").upper()
+        lines.append("")
+        lines.append("═" * 62)
+        lines.append(f"  STREAM #{i}  —  {codec_type}")
+        lines.append("═" * 62)
+
+        display_keys = [
+            "codec_name", "codec_long_name", "codec_type", "codec_tag_string",
+            "profile", "level",
+            "width", "height", "coded_width", "coded_height",
+            "pix_fmt", "bits_per_raw_sample",
+            "color_range", "color_space", "color_transfer", "color_primaries",
+            "sample_rate", "channels", "channel_layout", "bits_per_sample",
+            "r_frame_rate", "avg_frame_rate", "time_base",
+            "duration", "duration_ts", "nb_frames",
+            "bit_rate", "max_bit_rate",
+            "sample_fmt", "sample_aspect_ratio", "display_aspect_ratio",
+            "start_time", "start_pts", "field_order",
+        ]
+        for key in display_keys:
+            if key in s and s[key] not in (None, "unknown", "N/A", "0/0"):
+                val = s[key]
+                if key == "bit_rate":
+                    val = f"{int(val)/1000:.1f} kbps"
+                lines.append(f"  {key:25s} : {val}")
+
+        # Stream-level side_data_list
+        stream_side_data = s.get("side_data_list", [])
+
+        # Merge with frame side_data
+        all_side_data = stream_side_data + frame_side_data.get(i, [])
+
+        # ── HDR Analysis (video streams only) ──
+        if codec_type == "VIDEO":
+            lines.append("")
+            lines.append("  ┌─────────────────────────────────────────────────────┐")
+            lines.append("  │              HDR / COLOR ANALYSIS                   │")
+            lines.append("  └─────────────────────────────────────────────────────┘")
+
+            hdr_info = classify_hdr(s, all_side_data if all_side_data else None)
+            for k, v in hdr_info.items():
+                if v == "":
+                    lines.append(f"  {k}")
+                else:
+                    lines.append(f"  {k:30s} : {v}")
+
+        # Raw side data dump
+        if all_side_data:
+            lines.append("")
+            lines.append("  ── side_data (raw) ──")
+            for sd in all_side_data:
+                sd_type = sd.get("side_data_type", "unknown")
+                lines.append(f"    [{sd_type}]")
+                for k, v in sd.items():
+                    if k != "side_data_type":
+                        lines.append(f"      {k:23s} : {v}")
+
+        # Disposition flags
+        disp = s.get("disposition", {})
+        active = [k for k, v in disp.items() if v == 1]
+        if active:
+            lines.append(f"  {'disposition':25s} : {', '.join(active)}")
+
+        # Stream tags
+        if "tags" in s and s["tags"]:
+            lines.append("  ── tags ──")
+            for k, v in s["tags"].items():
+                lines.append(f"    {k:23s} : {v}")
+
+    return "\n".join(lines)
+
+
+def format_opencv(data: dict) -> str:
+    lines = []
+    lines.append("═" * 62)
+    lines.append("  STREAM INFO  (OpenCV — install ffprobe for full HDR detail)")
+    lines.append("═" * 62)
+    for k, v in data.items():
+        lines.append(f"  {k:25s} : {v}")
+    return "\n".join(lines)
+
+
+# ─── Application ─────────────────────────────────────────────────────────────
+
+class VideoAnalyzerApp:
+    SAMPLE_PIXELS = 4000
+    CHART_UPDATE_MS = 80
+
+    def __init__(self, root: tk.Tk, initial_path: str | None = None):
+        self.root = root
+        self.root.title("Video Analyzer — HDR · Hue / Saturation · Luminance")
+        self.root.geometry("1500x900")
+        self.root.minsize(1100, 650)
+        self.root.protocol("WM_DELETE_WINDOW", self._on_close)
+
+        self.cap: cv2.VideoCapture | None = None
+        self.playing = False
+        self.lock = threading.Lock()
+        self.current_hsv: np.ndarray | None = None
+        self.current_bgr: np.ndarray | None = None
+        self.fps = 30.0
+        self.total_frames = 0
+        self.seeking = False
+        self.is_hdr = False
+        self.hdr_label = "SDR"
+
+        self._build_ui()
+
+        if initial_path and os.path.isfile(initial_path):
+            self.root.after(200, lambda: self._load_video(initial_path))
+
+    # ── UI ────────────────────────────────────────────────────────────────
+
+    def _build_ui(self):
+        style = ttk.Style()
+        style.configure("TButton", padding=4)
+        style.configure("HDR.TLabel", foreground="#f0c040", font=("Segoe UI", 10, "bold"))
+        style.configure("SDR.TLabel", foreground="#888", font=("Segoe UI", 10))
+
+        # Top toolbar
+        toolbar = ttk.Frame(self.root)
+        toolbar.pack(fill=tk.X, padx=6, pady=(6, 2))
+
+        ttk.Button(toolbar, text="Open Video…", command=self._open_file).pack(side=tk.LEFT)
+        self.btn_play = ttk.Button(toolbar, text="▶  Play", command=self._toggle_play, state=tk.DISABLED)
+        self.btn_play.pack(side=tk.LEFT, padx=(10, 0))
+        self.btn_stop = ttk.Button(toolbar, text="⏹  Stop", command=self._stop, state=tk.DISABLED)
+        self.btn_stop.pack(side=tk.LEFT, padx=4)
+
+        self.lbl_hdr_badge = ttk.Label(toolbar, text="", style="SDR.TLabel")
+        self.lbl_hdr_badge.pack(side=tk.LEFT, padx=(16, 0))
+
+        self.lbl_status = ttk.Label(toolbar, text="No file loaded", foreground="gray")
+        self.lbl_status.pack(side=tk.RIGHT)
+
+        # Seek bar
+        seek_frame = ttk.Frame(self.root)
+        seek_frame.pack(fill=tk.X, padx=6, pady=2)
+        self.seek_var = tk.IntVar(value=0)
+        self.seek_bar = ttk.Scale(seek_frame, from_=0, to=100, orient=tk.HORIZONTAL,
+                                  variable=self.seek_var, command=self._on_seek)
+        self.seek_bar.pack(fill=tk.X, expand=True, side=tk.LEFT)
+        self.lbl_time = ttk.Label(seek_frame, text="00:00:00 / 00:00:00", width=24, anchor=tk.CENTER)
+        self.lbl_time.pack(side=tk.RIGHT)
+
+        # Main paned area
+        pane = ttk.PanedWindow(self.root, orient=tk.HORIZONTAL)
+        pane.pack(fill=tk.BOTH, expand=True, padx=6, pady=(2, 6))
+
+        # Left: stream info
+        left = ttk.LabelFrame(pane, text=" Stream & HDR Information ")
+        pane.add(left, weight=1)
+        self.info_text = scrolledtext.ScrolledText(left, wrap=tk.WORD, font=("Consolas", 9),
+                                                    state=tk.DISABLED, bg="#1e1e1e", fg="#d4d4d4",
+                                                    insertbackground="#d4d4d4", relief=tk.FLAT)
+        self.info_text.pack(fill=tk.BOTH, expand=True, padx=2, pady=2)
+        # Syntax-highlight tags
+        self.info_text.tag_config("hdr_header", foreground="#f0c040", font=("Consolas", 9, "bold"))
+        self.info_text.tag_config("hdr_value", foreground="#4ec9b0")
+
+        # Right: charts stacked
+        right = ttk.Frame(pane)
+        pane.add(right, weight=2)
+
+        # ── Hue × Saturation chart (polar) ──
+        chart_top = ttk.LabelFrame(right, text=" Live Hue × Saturation ")
+        chart_top.pack(fill=tk.BOTH, expand=True, pady=(0, 2))
+
+        self.fig_hs = Figure(figsize=(6, 4), facecolor="#1e1e1e")
+        self.ax_hs = self.fig_hs.add_subplot(111, projection="polar")
+        self._setup_polar_axis()
+        self.canvas_hs = FigureCanvasTkAgg(self.fig_hs, master=chart_top)
+        self.canvas_hs.get_tk_widget().pack(fill=tk.BOTH, expand=True)
+
+        # ── Luminance distribution chart ──
+        chart_bot = ttk.LabelFrame(right, text=" Luminance Distribution ")
+        chart_bot.pack(fill=tk.BOTH, expand=True, pady=(2, 0))
+
+        self.fig_lum = Figure(figsize=(6, 2.2), facecolor="#1e1e1e")
+        self.ax_lum = self.fig_lum.add_subplot(111)
+        self._setup_lum_axis()
+        self.canvas_lum = FigureCanvasTkAgg(self.fig_lum, master=chart_bot)
+        self.canvas_lum.get_tk_widget().pack(fill=tk.BOTH, expand=True)
+
+    def _setup_polar_axis(self):
+        ax = self.ax_hs
+        ax.set_facecolor("#1e1e1e")
+        ax.set_theta_zero_location("N")
+        ax.set_theta_direction(-1)
+        ax.set_ylim(0, 255)
+        ax.set_yticks([64, 128, 192, 255])
+        ax.set_yticklabels(["64", "128", "192", "255"], fontsize=7, color="#888")
+        ax.set_rlabel_position(45)
+
+        hue_labels = {0: "Red", 30: "Org", 60: "Yel", 90: "Cht",
+                      120: "Grn", 150: "Spr", 180: "Cyn", 210: "Azu",
+                      240: "Blu", 270: "Vio", 300: "Mag", 330: "Rose"}
+        angles = [np.deg2rad(h) for h in hue_labels]
+        ax.set_xticks(angles)
+        ax.set_xticklabels(hue_labels.values(), fontsize=7, color="#aaa")
+        ax.tick_params(axis='x', pad=8)
+        ax.grid(True, alpha=0.25, color="#555")
+        self.scatter = ax.scatter([], [], s=1, alpha=0.35)
+        self.fig_hs.tight_layout(pad=1.2)
+
+    def _setup_lum_axis(self):
+        ax = self.ax_lum
+        ax.set_facecolor("#1e1e1e")
+        ax.set_xlim(0, 255)
+        ax.set_xlabel("Luminance (Value channel)", fontsize=8, color="#aaa")
+        ax.set_ylabel("Density", fontsize=8, color="#aaa")
+        ax.tick_params(colors="#888", labelsize=7)
+        for spine in ax.spines.values():
+            spine.set_color("#444")
+        ax.grid(True, alpha=0.15, color="#555")
+        self.fig_lum.tight_layout(pad=1.5)
+
+    # ── File Handling ─────────────────────────────────────────────────────
+
+    def _open_file(self):
+        path = filedialog.askopenfilename(
+            title="Select Video",
+            filetypes=[
+                ("Video files", "*.mp4 *.mkv *.avi *.mov *.wmv *.flv *.webm *.m4v *.ts *.mpg *.mpeg *.3gp *.hevc *.265"),
+                ("All files", "*.*")
+            ]
+        )
+        if path:
+            self._load_video(path)
+
+    def _load_video(self, path: str):
+        self._stop()
+        self.cap = cv2.VideoCapture(path)
+        if not self.cap.isOpened():
+            self.lbl_status.config(text="Error: cannot open file", foreground="red")
+            return
+
+        self.fps = self.cap.get(cv2.CAP_PROP_FPS) or 30.0
+        self.total_frames = int(self.cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        self.seek_bar.config(to=max(self.total_frames - 1, 1))
+
+        self.btn_play.config(state=tk.NORMAL)
+        self.btn_stop.config(state=tk.NORMAL)
+        self.lbl_status.config(text=os.path.basename(path), foreground="#4ec9b0")
+
+        # Extract info in background
+        threading.Thread(target=self._extract_info, args=(path,), daemon=True).start()
+
+        # Read first frame
+        self._read_and_process_frame()
+
+    def _extract_info(self, path: str):
+        probe = extract_with_ffprobe(path)
+        if probe:
+            text = format_ffprobe(probe)
+            # Detect HDR from stream data
+            hdr_label = "SDR"
+            for s in probe.get("streams", []):
+                if s.get("codec_type") == "video":
+                    frame_sd = []
+                    for f in probe.get("frames", []):
+                        if f.get("stream_index", 0) == s.get("index", 0):
+                            frame_sd.extend(f.get("side_data_list", []))
+                    all_sd = s.get("side_data_list", []) + frame_sd
+                    hdr_info = classify_hdr(s, all_sd if all_sd else None)
+                    hdr_label = hdr_info.get("HDR Format", "SDR")
+                    break
+        else:
+            ocv = extract_with_opencv(path)
+            text = format_opencv(ocv.get("opencv", ocv))
+            hdr_label = "SDR (install ffprobe for HDR detection)"
+
+        self.hdr_label = hdr_label
+        self.is_hdr = "HDR" in hdr_label or "PQ" in hdr_label or "HLG" in hdr_label or "Dolby" in hdr_label
+        self.root.after(0, self._set_info_text, text)
+        self.root.after(0, self._update_hdr_badge)
+
+    def _set_info_text(self, text: str):
+        self.info_text.config(state=tk.NORMAL)
+        self.info_text.delete("1.0", tk.END)
+        self.info_text.insert(tk.END, text)
+        self.info_text.config(state=tk.DISABLED)
+
+    def _update_hdr_badge(self):
+        if self.is_hdr:
+            self.lbl_hdr_badge.config(text=f"⬤  {self.hdr_label}", style="HDR.TLabel")
+        else:
+            self.lbl_hdr_badge.config(text=f"○  {self.hdr_label}", style="SDR.TLabel")
+
+    # ── Playback ──────────────────────────────────────────────────────────
+
+    def _toggle_play(self):
+        if self.playing:
+            self.playing = False
+            self.btn_play.config(text="▶  Play")
+        else:
+            self.playing = True
+            self.btn_play.config(text="⏸  Pause")
+            threading.Thread(target=self._play_loop, daemon=True).start()
+            self._chart_tick()
+
+    def _stop(self):
+        self.playing = False
+        self.btn_play.config(text="▶  Play")
+        if self.cap and self.cap.isOpened():
+            self.cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+        self.seek_var.set(0)
+        self._update_time_label(0)
+
+    def _play_loop(self):
+        delay = 1.0 / self.fps
+        while self.playing and self.cap and self.cap.isOpened():
+            t0 = time.perf_counter()
+            if not self._read_and_process_frame():
+                self.playing = False
+                self.root.after(0, lambda: self.btn_play.config(text="▶  Play"))
+                break
+            elapsed = time.perf_counter() - t0
+            sleep_t = delay - elapsed
+            if sleep_t > 0:
+                time.sleep(sleep_t)
+
+    def _read_and_process_frame(self) -> bool:
+        with self.lock:
+            if not self.cap or not self.cap.isOpened():
+                return False
+            ret, frame = self.cap.read()
+            if not ret:
+                return False
+            pos = int(self.cap.get(cv2.CAP_PROP_POS_FRAMES))
+
+        self.current_bgr = frame
+        self.current_hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
+
+        if not self.seeking:
+            self.root.after(0, self._update_seek, pos)
+        return True
+
+    def _update_seek(self, pos):
+        self.seeking = True
+        self.seek_var.set(pos)
+        self._update_time_label(pos)
+        self.seeking = False
+
+    def _on_seek(self, val):
+        if self.seeking:
+            return
+        frame_no = int(float(val))
+        with self.lock:
+            if self.cap and self.cap.isOpened():
+                self.cap.set(cv2.CAP_PROP_POS_FRAMES, frame_no)
+        if not self.playing:
+            self._read_and_process_frame()
+            self._update_charts()
+        self._update_time_label(frame_no)
+
+    def _update_time_label(self, frame_no):
+        cur = frame_no / self.fps if self.fps else 0
+        tot = self.total_frames / self.fps if self.fps else 0
+        self.lbl_time.config(
+            text=f"{time.strftime('%H:%M:%S', time.gmtime(cur))} / "
+                 f"{time.strftime('%H:%M:%S', time.gmtime(tot))}"
+        )
+
+    # ── Charts ────────────────────────────────────────────────────────────
+
+    def _chart_tick(self):
+        if not self.playing:
+            return
+        self._update_charts()
+        self.root.after(self.CHART_UPDATE_MS, self._chart_tick)
+
+    def _update_charts(self):
+        self._update_hs_chart()
+        self._update_lum_chart()
+
+    def _update_hs_chart(self):
+        hsv = self.current_hsv
+        if hsv is None:
+            return
+
+        flat = hsv.reshape(-1, 3)
+        n = min(self.SAMPLE_PIXELS, flat.shape[0])
+        idx = np.random.randint(0, flat.shape[0], size=n)
+        sample = flat[idx]
+
+        hue = sample[:, 0].astype(np.float64)
+        sat = sample[:, 1].astype(np.float64)
+        val = sample[:, 2].astype(np.float64)
+
+        theta = np.deg2rad(hue * 2.0)
+
+        # Vectorised HSV→RGB for dot colors
+        hsv_pixels = sample.reshape(n, 1, 3).astype(np.uint8)
+        bgr_pixels = cv2.cvtColor(hsv_pixels, cv2.COLOR_HSV2BGR)
+        rgb_colors = bgr_pixels.reshape(n, 3)[:, ::-1] / 255.0
+
+        self.ax_hs.clear()
+        self._setup_polar_axis()
+        self.ax_hs.scatter(theta, sat, c=rgb_colors, s=2, alpha=0.45, linewidths=0)
+        self.canvas_hs.draw_idle()
+
+    def _update_lum_chart(self):
+        hsv = self.current_hsv
+        if hsv is None:
+            return
+
+        val_channel = hsv[:, :, 2].ravel()
+
+        ax = self.ax_lum
+        ax.clear()
+        self._setup_lum_axis()
+
+        # Draw histogram with gradient fill
+        counts, bin_edges = np.histogram(val_channel, bins=128, range=(0, 255))
+        counts_norm = counts / counts.max() if counts.max() > 0 else counts
+        bin_centers = (bin_edges[:-1] + bin_edges[1:]) / 2
+
+        # Color gradient: dark purple → golden yellow for HDR feel
+        if self.is_hdr:
+            colors_low = np.array([0.2, 0.1, 0.4])
+            colors_high = np.array([1.0, 0.85, 0.15])
+            label_text = "HDR Luminance"
+        else:
+            colors_low = np.array([0.15, 0.3, 0.5])
+            colors_high = np.array([0.4, 0.85, 1.0])
+            label_text = "SDR Luminance"
+
+        bar_colors = np.array([
+            colors_low + (colors_high - colors_low) * (c / 255.0)
+            for c in bin_centers
+        ])
+
+        ax.bar(bin_centers, counts_norm, width=2.1, color=bar_colors, alpha=0.85, linewidth=0)
+
+        # Show mean / peak lines
+        mean_val = val_channel.mean()
+        ax.axvline(mean_val, color="#f0c040" if self.is_hdr else "#4ec9b0",
+                   linewidth=1.2, linestyle="--", alpha=0.8, label=f"Mean: {mean_val:.0f}")
+
+        p99 = np.percentile(val_channel, 99)
+        ax.axvline(p99, color="#ff6060", linewidth=1.0, linestyle=":",
+                   alpha=0.7, label=f"99th %ile: {p99:.0f}")
+
+        ax.legend(fontsize=7, loc="upper right", framealpha=0.5,
+                  facecolor="#1e1e1e", edgecolor="#444", labelcolor="#ccc")
+        ax.set_title(label_text, fontsize=8, color="#aaa", pad=4)
+
+        self.canvas_lum.draw_idle()
+
+    # ── Cleanup ───────────────────────────────────────────────────────────
+
+    def _on_close(self):
+        self.playing = False
+        time.sleep(0.05)
+        if self.cap:
+            self.cap.release()
+        self.root.destroy()
+
+
+# ─── Entry Point ─────────────────────────────────────────────────────────────
+
+def main():
+    root = tk.Tk()
+    path = sys.argv[1] if len(sys.argv) > 1 else None
+    app = VideoAnalyzerApp(root, initial_path=path)
+    root.mainloop()
+
+
+if __name__ == "__main__":
+    main()

@@ -1,0 +1,8 @@
+{
+  "name": "steg",
+  "title": "Hidden-data / steganography scan",
+  "version": "1.0.0",
+  "description": "Detect data hidden in a video file: container forensics (appended data, polyglot archives, stuffed padding atoms, unreferenced mdat, entropy map), pixel-LSB steganalysis (RS + chi-square, gated to lossless sources), and compressed-domain indicators (SEI user-data NAL scan, frame-size-vs-complexity residual). 'steg' QC profile + analyze.py pass writing <name>.steg.txt.",
+  "entry": "plugin.py",
+  "api": 2
+}

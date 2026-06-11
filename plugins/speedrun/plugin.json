@@ -1,0 +1,8 @@
+{
+  "name": "speedrun",
+  "title": "Speedrun forensics",
+  "version": "1.0.0",
+  "description": "Run-verification workbench: Verify run (platform/tempo screens + forensic verdicts), speedrun QC profile, frame-accurate retimer with mod notes, load remover / load-removed time, music-bed continuity scan, RNG luck calculator.",
+  "entry": "plugin.py",
+  "api": 1
+}

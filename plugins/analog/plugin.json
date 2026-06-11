@@ -1,0 +1,8 @@
+{
+  "name": "analog",
+  "title": "Analog artifact detector",
+  "version": "1.0.0",
+  "description": "Tape-era artifact scan for digitised analog video: dropout streaks, VHS head-switching noise, time-base (TBC) line wobble, AGC/film luma flicker. Timeline marks + 'analog' QC profile + analyze.py pass.",
+  "entry": "plugin.py",
+  "api": 2
+}

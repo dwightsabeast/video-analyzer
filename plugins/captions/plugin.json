@@ -1,0 +1,8 @@
+{
+  "name": "captions",
+  "title": "Captions QC",
+  "version": "1.0.0",
+  "description": "Subtitle/caption compliance: track discovery (text/bitmap/CC), speech coverage, systematic sync offset vs speech onsets, reading speed (CPS), overlaps and layout. 'captions' QC profile + analyze.py pass writing <name>.captions.txt.",
+  "entry": "plugin.py",
+  "api": 2
+}
