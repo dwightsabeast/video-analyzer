@@ -41,9 +41,12 @@ import zipfile
 import va_theme
 
 API_VERSION = 2
-DEFAULT_REGISTRY_URL = ""        # set yours in the Plugins manager (ui key
-                                 # "plugin_registry_url"); see
-                                 # plugins/registry.example.json for the format
+DEFAULT_REGISTRY_URL = ("https://raw.githubusercontent.com/dwightsabeast/"
+                        "video-analyzer/main/dist/registry.json")
+                                 # overridable in the Plugins manager (ui key
+                                 # "plugin_registry_url"); format in
+                                 # plugins/registry.example.json; published by
+                                 # pack_plugins.py
 
 
 SERVICES: dict = {}      # inter-plugin services: name -> object/callable

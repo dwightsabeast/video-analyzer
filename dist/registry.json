@@ -1,0 +1,42 @@
+[
+  {
+    "name": "analog",
+    "title": "Analog artifact detector",
+    "version": "1.0.0",
+    "description": "Tape-era artifact scan for digitised analog video: dropout streaks, VHS head-switching noise, time-base (TBC) line wobble, AGC/film luma flicker. Timeline marks + 'analog' QC profile + analyze.py pass.",
+    "zip_url": "https://raw.githubusercontent.com/dwightsabeast/video-analyzer/main/dist/analog-1.0.0.zip",
+    "sha256": "88e29b80457e0c11cbe20395bc00e53d8d787f479714d81e9e28d9296223847e"
+  },
+  {
+    "name": "captions",
+    "title": "Captions QC",
+    "version": "1.0.0",
+    "description": "Subtitle/caption compliance: track discovery (text/bitmap/CC), speech coverage, systematic sync offset vs speech onsets, reading speed (CPS), overlaps and layout. 'captions' QC profile + analyze.py pass writing <name>.captions.txt.",
+    "zip_url": "https://raw.githubusercontent.com/dwightsabeast/video-analyzer/main/dist/captions-1.0.0.zip",
+    "sha256": "57a8533aed0c79d73d9fad096d0651302ef47e216a2b821572b915bc09741a39"
+  },
+  {
+    "name": "ocr",
+    "title": "Timer / timecode OCR",
+    "version": "1.0.0",
+    "description": "Burned-in timer audit: calibrate the overlay font once (no OCR engine needed), then read it on every frame - backward jumps and skips (splice evidence), freezes, and clock-drift slope (slowed/sped-up footage). LiveSplit, in-game timers, SMPTE burn-ins, CCTV timestamps.",
+    "zip_url": "https://raw.githubusercontent.com/dwightsabeast/video-analyzer/main/dist/ocr-1.0.0.zip",
+    "sha256": "502fd3866c208eb6a31c738ab07e4228a972e3b0b31de5196c70c030c8f0823b"
+  },
+  {
+    "name": "speedrun",
+    "title": "Speedrun forensics",
+    "version": "1.0.0",
+    "description": "Run-verification workbench: Verify run (platform/tempo screens + forensic verdicts), speedrun QC profile, frame-accurate retimer with mod notes, load remover / load-removed time, music-bed continuity scan, RNG luck calculator.",
+    "zip_url": "https://raw.githubusercontent.com/dwightsabeast/video-analyzer/main/dist/speedrun-1.0.0.zip",
+    "sha256": "38d02ff553a56012ee1d9258e418da889b67e465658361566917b4a621eaff43"
+  },
+  {
+    "name": "steg",
+    "title": "Hidden-data / steganography scan",
+    "version": "1.0.0",
+    "description": "Detect data hidden in a video file: container forensics (appended data, polyglot archives, stuffed padding atoms, unreferenced mdat, entropy map), pixel-LSB steganalysis (RS + chi-square, gated to lossless sources), and compressed-domain indicators (SEI user-data NAL scan, frame-size-vs-complexity residual). 'steg' QC profile + analyze.py pass writing <name>.steg.txt.",
+    "zip_url": "https://raw.githubusercontent.com/dwightsabeast/video-analyzer/main/dist/steg-1.0.0.zip",
+    "sha256": "eea524b821f6fdee537d13ba2389499e45ef18801c2fffe88aabbf17f860b3f3"
+  }
+]

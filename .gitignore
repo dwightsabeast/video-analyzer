@@ -1,0 +1,5 @@
+__pycache__/
+*.pyc
+*.bak
+# note: dist/ is intentionally tracked - it is the plugin registry users
+# download from (see README "Publishing plugins")

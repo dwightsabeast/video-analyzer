@@ -123,11 +123,15 @@ def t_registry(tmp):
         check("registry validated", [e["name"] for e in reg] == ["good"])
     finally:
         va_tools._http_get = real
+    real_ru = va_plugins.registry_url   # neutralise the shipped default +
+    va_plugins.registry_url = lambda: ""  # any saved URL: "" must still raise
     try:
         va_plugins.fetch_registry("")
         check("empty url rejected", False)
     except ValueError:
         check("empty url rejected", True)
+    finally:
+        va_plugins.registry_url = real_ru
 
 
 def t_cascade_api():

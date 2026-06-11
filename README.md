@@ -166,6 +166,7 @@ folder, and reload. Plugins are ordinary Python running with your full
 permissions — install only code you trust. A broken plugin is isolated at
 load and reported in the status bar; everything else keeps working.
 
+<<<<<<< Updated upstream
 **Publishing plugins** — `pack_plugins.py` builds everything the registry
 needs (stdlib only, deterministic zips so unchanged plugins keep their
 sha256):
@@ -186,6 +187,24 @@ keep private packs on an internal HTTP(S) server instead — same script,
 different `--base-url`. To update a plugin, bump `version` in its
 `plugin.json`, re-run the script with a new tag, and replace the committed
 `registry.json`.
+=======
+**Publishing plugins** — each plugin ships as its own zip listed in
+`dist/registry.json`, so users install packs individually from
+**Manage plugins...** (the app comes pre-pointed at this repo's registry via
+`DEFAULT_REGISTRY_URL` in `va_plugins.py`). `pack_plugins.py` builds it all
+(stdlib only, deterministic zips so unchanged plugins keep their sha256):
+
+```bash
+python pack_plugins.py --base-url https://raw.githubusercontent.com/dwightsabeast/video-analyzer/main/dist
+git add dist && git commit -m "publish plugins" && git push
+```
+
+To update one plugin: bump `version` in its `plugin.json`, re-run the
+script, push. Users see the new version on the next **Fetch** and reinstall
+just that pack. The repo must stay public (the downloader sends no auth);
+for private packs host `dist/` on an internal HTTP(S) server instead — same
+script, different `--base-url`.
+>>>>>>> Stashed changes
 
 **Plugin API v2** lets packs reach deep into the app: **timeline series**
 (per-time curves join the metric selector — timer drift, line jitter),
@@ -404,4 +423,18 @@ single-decode combined passes: doing the work once is the biggest saving of all.
 | `va_plugins.py` | plugin framework: discovery/manifests, GUI + headless loading, zip install, registry |
 | `va_plugins_ui.py` | Plugins manager dialog |
 | `plugins/speedrun/` | speedrun plugin: run verification (platform/tempo screens + verdicts), retimer, load remover, music continuity, luck calculator |
+<<<<<<< Updated upstream
 | `va_forensics.py` | corroborated splice scan, container/encoder/metadata forensics, ELA + no
+=======
+| `va_forensics.py` | corroborated splice scan, container/encoder/metadata forensics, ELA + noise maps, loop detection, ENF trace, SHA-256, C2PA validation |
+| `va_hdr.py` | PQ nits analysis, MaxCLL/MaxFALL verification, multi-display preview |
+| `va_dynhdr.py` | Dolby Vision / HDR10+ dynamic-metadata inspect, verify, and plots |
+| `va_theme.py` | dark theme + persisted UI preferences (`va_ui.json`) |
+| `va_tools.py` | helper-binary downloads (ffmpeg, dovi_tool, ...) into `tools/` |
+| `va_paths.py` | app/bundle dir resolution + console attach for the frozen exe |
+| `pack_plugins.py` | builds `dist/` plugin zips + `registry.json` for publishing |
+| `plugins/analog/` | analog artifact detector pack (dropouts, head-switch, TBC wobble, flicker) |
+| `plugins/captions/` | captions QC pack (sync, reading speed, coverage, layout) |
+| `plugins/ocr/` | timer/timecode OCR pack (calibrated glyph templates, drift audit) |
+| `plugins/steg/` | hidden-data / steganography pack (container, LSB, codec layers) |
+>>>>>>> Stashed changes
